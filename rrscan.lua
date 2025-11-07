@@ -30,7 +30,7 @@ local FrostElName      = "Blue Affinity"
 local ArcaneElName     = "Mana Affinity"
 local NatureElName     = "Green Affinity"
 local ShadowElName     = "Black Affinity"
-local PhysicalElName   = "Crystal Affinity"
+local PhysicalElName   = "Mangy Wolf"
 local playerclass        
 
 local affinityMessages = {
