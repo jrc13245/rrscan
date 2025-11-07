@@ -343,9 +343,10 @@ end
 
 -- ===== VANILLA: TARGET BY NAME (FALLBACK) =====
 function targetAliveElementalByName(name)
-	Stats.vanillaTargets = Stats.vanillaTargets + 1
+	-- Erst prüfen ob die Affinity überhaupt existiert, BEVOR wir Target clearen
+	local found = false
 	
-	ClearTarget()
+	-- Scan ohne Target zu ändern
 	for i = 1, 10 do
 		TargetNearestEnemy()
 		if UnitExists("target") then
@@ -354,10 +355,14 @@ function targetAliveElementalByName(name)
 			local isFriend = UnitIsFriend("player", "target")
 
 			if not isDead and not isFriend and unitName == strlower(name) then
+				found = true
+				Stats.vanillaTargets = Stats.vanillaTargets + 1
 				return true
 			end
 		end
 	end
+	
+	-- Nur wenn NICHT gefunden, Target NICHT ändern (altes Target behalten)
 	return false
 end
 
