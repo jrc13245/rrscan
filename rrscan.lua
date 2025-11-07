@@ -607,3 +607,6 @@ local function Initialize()
 		cleanupFrame:Hide()
 	end
 end
+
+-- ===== RUFE INITIALIZE AUF =====
+Initialize()
