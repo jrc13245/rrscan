@@ -141,7 +141,6 @@ local Stats = {
 	guidsCollected = 0,
 	affinitiesFound = 0,
 	superWowTargets = 0,
-	vanillaTargets = 0,
 }
 
 -- ===== GUID COLLECTION =====
@@ -366,8 +365,13 @@ function targetAliveElementalByName(name)
 	return false
 end
 
--- ===== MAIN SCAN FUNCTION (IMPROVED) =====
+-- ===== MAIN SCAN FUNCTION (SUPERWOW ONLY) =====
 function rrScan(safeDefaultSpell)
+    if not hasSuperWoW then
+        DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r SuperWoW required! Install SuperWoW to use this addon.", 1, 0, 0)
+        return false
+    end
+    
     playerclass = strlower(UnitClass("player"))
     if not pclasses[playerclass] then
         CastSpellByName(safeDefaultSpell)
@@ -398,23 +402,13 @@ function rrScan(safeDefaultSpell)
         end
     end
 
-    -- Scan for alive Affinity (SuperWoW FIRST, then vanilla fallback)
+    -- Scan for alive Affinity (SuperWoW ONLY)
     if not engaging then
         for _, affinity in ipairs(EleTargets) do
             local ability = strlower(pclasses[playerclass][affinity] or "")
             if ability ~= "cantattack" then
-                -- Try SuperWoW GUID targeting first
-                local targeted = false
-                if hasSuperWoW then
-                    targeted = targetAffinityByGUID(affinity)
-                end
-                
-                -- Fallback to vanilla method
-                if not targeted then
-                    targeted = targetAliveElementalByName(affinity)
-                end
-                
-                if targeted then
+                -- SuperWoW GUID targeting
+                if targetAffinityByGUID(affinity) then
                     rrEngageElemental(affinity, false)
                     engaging = true
                     break
@@ -552,7 +546,6 @@ SlashCmdList["RRSCAN"] = function(msg)
 		DEFAULT_CHAT_FRAME:AddMessage("  GUIDs Collected: " .. Stats.guidsCollected)
 		DEFAULT_CHAT_FRAME:AddMessage("  Affinities Found: " .. Stats.affinitiesFound)
 		DEFAULT_CHAT_FRAME:AddMessage("  SuperWoW Targets: " .. Stats.superWowTargets)
-		DEFAULT_CHAT_FRAME:AddMessage("  Vanilla Targets: " .. Stats.vanillaTargets)
 		
 		if hasSuperWoW then
 			DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00Known Affinities:|r")
@@ -597,7 +590,6 @@ SlashCmdList["RRSCAN"] = function(msg)
 	end
 end
 
--- ===== INITIALIZATION =====
 local function Initialize()
 	-- Check if SuperWoW is available
 	hasSuperWoW = (TargetUnit ~= nil and SpellInfo ~= nil)
@@ -608,11 +600,10 @@ local function Initialize()
 		guidFrame:Show()
 		cleanupFrame:Show()
 	else
-		DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00[rrScan]|r Loaded. SuperWoW not detected - using vanilla targeting")
-		DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00[rrScan]|r Install SuperWoW for instant GUID-based targeting!")
+		DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r ERROR: SuperWoW NOT detected!")
+		DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r This addon REQUIRES SuperWoW to function!")
+		DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r Download: https://github.com/balakethelock/SuperWoW")
 		guidFrame:Hide()
 		cleanupFrame:Hide()
 	end
 end
-
-Initialize()
