@@ -1,3 +1,30 @@
+--[[
+rrscan.lua - Affinity Scanner (SuperWoW Enhanced)
+IMPROVEMENTS:
+- GUID-based targeting (instant, no TargetNearestEnemy loop!)
+- Persistent GUID cache (finds Affinities even when out of range)
+- Proactive scanning (collects GUIDs from all events)
+- Fallback to vanilla method if SuperWoW not available
+- Memory leak fixes
+- Performance optimizations
+]]
+
+-- ===== PERFORMANCE: Cache global functions =====
+local strfind = string.find
+local strlower = string.lower
+local strformat = string.format
+local GetTime = GetTime
+local UnitExists = UnitExists
+local UnitName = UnitName
+local UnitHealth = UnitHealth
+local UnitIsDead = UnitIsDead
+local UnitIsDeadOrGhost = UnitIsDeadOrGhost
+local UnitIsFriend = UnitIsFriend
+local CastSpellByName = CastSpellByName
+local TargetUnit = _G.TargetUnit  -- SuperWoW function
+local SpellInfo = _G.SpellInfo    -- SuperWoW function
+
+-- ===== AFFINITY DEFINITIONS =====
 local FireElName       = "Red Affinity"
 local FrostElName      = "Blue Affinity"
 local ArcaneElName     = "Mana Affinity"
@@ -103,8 +130,240 @@ local pclasses = {
 	["paladin"]   = paladinSpells,
 }
 
+-- ===== SUPERWOW GUID SYSTEM =====
+local hasSuperWoW = false
+local GUIDCache = {}  -- guid -> {name, time}
+local NameToGUID = {}  -- name -> guid (for targeting)
+local AffinityGUIDs = {}  -- Separate cache for Affinities only
+local debugMode = false
+
+local Stats = {
+	guidsCollected = 0,
+	affinitiesFound = 0,
+	superWowTargets = 0,
+	vanillaTargets = 0,
+}
+
+-- ===== GUID COLLECTION =====
+local function AddUnit(unit)
+	if not hasSuperWoW then return end
+	if not unit then return end
+	
+	local exists, guid = UnitExists(unit)
+	if not exists or not guid then return end
+	
+	local name = UnitName(guid)
+	if not name then return end
+	
+	-- Check if unit is dead
+	local isDead = UnitIsDead(guid) or UnitIsDeadOrGhost(guid) or UnitHealth(guid) <= 0
+	
+	-- Store in general GUID cache
+	local isNew = GUIDCache[guid] == nil
+	GUIDCache[guid] = {
+		name = name,
+		time = GetTime(),
+		isDead = isDead
+	}
+	
+	-- Update name-to-GUID mapping (only if alive!)
+	if not isDead then
+		NameToGUID[name] = guid
+	end
+	
+	-- Check if this is an Affinity
+	for _, affinityName in ipairs(EleTargets) do
+		if name == affinityName then
+			-- ✅ CRITICAL: Only store ALIVE Affinities!
+			-- If an old dead Affinity exists, replace it with new alive one
+			local oldGUID = AffinityGUIDs[affinityName]
+			
+			if not isDead then
+				-- New alive Affinity found
+				if oldGUID and oldGUID ~= guid then
+					-- Different GUID = new spawn, old one is dead
+					if debugMode then
+						DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00[rrScan]|r " .. affinityName .. " respawned (old GUID replaced)")
+					end
+				end
+				
+				AffinityGUIDs[affinityName] = guid
+				
+				if isNew then
+					Stats.guidsCollected = Stats.guidsCollected + 1
+					Stats.affinitiesFound = Stats.affinitiesFound + 1
+					if debugMode then
+						DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Found Affinity: " .. affinityName)
+					end
+				end
+			else
+				-- Dead Affinity found
+				-- Only remove from AffinityGUIDs if it's the same GUID (to allow new spawns)
+				if oldGUID == guid then
+					AffinityGUIDs[affinityName] = nil
+					if debugMode then
+						DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r " .. affinityName .. " died (removed from cache)")
+					end
+				end
+			end
+			break
+		end
+	end
+end
+
+-- ===== GUID CLEANUP =====
+local cleanupTimer = 0
+local CLEANUP_INTERVAL = 30
+
+local function CleanupOldGUIDs()
+	local removed = 0
+	
+	-- Cleanup GUIDs that no longer exist
+	for guid, data in pairs(GUIDCache) do
+		if not UnitExists(guid) then
+			GUIDCache[guid] = nil
+			removed = removed + 1
+		end
+	end
+	
+	-- ✅ CRITICAL: Cleanup DEAD Affinities from AffinityGUIDs cache
+	-- This ensures we don't target dead Affinities when new ones spawn
+	for name, guid in pairs(AffinityGUIDs) do
+		if not UnitExists(guid) then
+			-- GUID no longer exists - remove it
+			AffinityGUIDs[name] = nil
+			if debugMode then
+				DEFAULT_CHAT_FRAME:AddMessage("|cffaaaaaa[rrScan]|r " .. name .. " no longer exists (removed)")
+			end
+		else
+			-- GUID exists, but check if it's dead
+			local isDead = UnitIsDead(guid) or UnitIsDeadOrGhost(guid) or UnitHealth(guid) <= 0
+			if isDead then
+				AffinityGUIDs[name] = nil
+				if debugMode then
+					DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r " .. name .. " is dead (removed)")
+				end
+			end
+		end
+	end
+	
+	if debugMode and removed > 0 then
+		DEFAULT_CHAT_FRAME:AddMessage("|cffaaaaaa[rrScan]|r Cleaned up " .. removed .. " old GUIDs")
+	end
+end
+
+-- ===== GUID COLLECTION FRAME =====
+local guidFrame = CreateFrame("Frame")
+guidFrame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
+guidFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
+guidFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+guidFrame:RegisterEvent("UNIT_AURA")
+guidFrame:RegisterEvent("UNIT_HEALTH")
+
+guidFrame:SetScript("OnEvent", function()
+	if not hasSuperWoW then return end
+	
+	if event == "UPDATE_MOUSEOVER_UNIT" then
+		AddUnit("mouseover")
+	elseif event == "PLAYER_TARGET_CHANGED" then
+		AddUnit("target")
+		AddUnit("targettarget")
+	elseif event == "PLAYER_ENTERING_WORLD" then
+		AddUnit("player")
+		AddUnit("target")
+	else
+		local unit = arg1
+		if unit then
+			AddUnit(unit)
+		end
+	end
+end)
+
+-- ===== CLEANUP TIMER =====
+local cleanupFrame = CreateFrame("Frame")
+cleanupFrame:SetScript("OnUpdate", function()
+	if not hasSuperWoW then return end
+	
+	cleanupTimer = cleanupTimer + (arg1 or 0.01)
+	if cleanupTimer >= CLEANUP_INTERVAL then
+		cleanupTimer = 0
+		CleanupOldGUIDs()
+	end
+end)
+
+-- ===== SUPERWOW: TARGET BY GUID =====
+local function targetAffinityByGUID(affinityName)
+	if not hasSuperWoW or not TargetUnit then
+		return false
+	end
+	
+	local guid = AffinityGUIDs[affinityName]
+	if not guid then
+		return false
+	end
+	
+	-- ✅ CRITICAL: Verify GUID is still alive before targeting!
+	if not UnitExists(guid) then
+		-- GUID no longer exists - remove it
+		AffinityGUIDs[affinityName] = nil
+		if debugMode then
+			DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r " .. affinityName .. " GUID invalid (removed)")
+		end
+		return false
+	end
+	
+	-- Check if it's dead
+	local isDead = UnitIsDead(guid) or UnitIsDeadOrGhost(guid) or UnitHealth(guid) <= 0
+	if isDead then
+		-- Dead Affinity - remove from cache
+		AffinityGUIDs[affinityName] = nil
+		if debugMode then
+			DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r " .. affinityName .. " is dead (removed)")
+		end
+		return false
+	end
+	
+	-- Try to target by GUID
+	TargetUnit(guid)
+	
+	-- Verify target
+	if UnitExists("target") then
+		local _, targetGUID = UnitExists("target")
+		if targetGUID == guid then
+			Stats.superWowTargets = Stats.superWowTargets + 1
+			if debugMode then
+				DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r SuperWoW targeting: " .. affinityName)
+			end
+			return true
+		end
+	end
+	
+	return false
+end
+
+-- ===== VANILLA: TARGET BY NAME (FALLBACK) =====
+function targetAliveElementalByName(name)
+	Stats.vanillaTargets = Stats.vanillaTargets + 1
+	
+	ClearTarget()
+	for i = 1, 10 do
+		TargetNearestEnemy()
+		if UnitExists("target") then
+			local unitName = strlower(UnitName("target") or "")
+			local isDead = UnitIsDeadOrGhost("target") or UnitHealth("target") <= 0
+			local isFriend = UnitIsFriend("player", "target")
+
+			if not isDead and not isFriend and unitName == strlower(name) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- ===== MAIN SCAN FUNCTION (IMPROVED) =====
 function rrScan(safeDefaultSpell)
-    playerclass = string.lower(UnitClass("player"))
+    playerclass = strlower(UnitClass("player"))
     if not pclasses[playerclass] then
         CastSpellByName(safeDefaultSpell)
         return
@@ -115,12 +374,16 @@ function rrScan(safeDefaultSpell)
 
     -- Check if current target is an Affinity
     if UnitExists(unit) then  
-        local currentTargetName = string.lower(UnitName(unit))
+        local currentTargetName = UnitName(unit)
+        
+        -- Collect GUID from current target
+        AddUnit(unit)
+        
         for _, affinity in ipairs(EleTargets) do
-            if string.lower(affinity) == currentTargetName then
+            if currentTargetName == affinity then
                 local unNotAttackable = UnitIsFriend("player", unit)
                 local unDead = not (UnitHealth(unit) > 0) or UnitIsDeadOrGhost(unit)
-                local ability = string.lower(pclasses[playerclass][affinity] or "")
+                local ability = strlower(pclasses[playerclass][affinity] or "")
                 if not (unNotAttackable or unDead) and ability ~= "cantattack" then
                     engaging = true
                     rrEngageElemental(affinity, true)
@@ -130,13 +393,23 @@ function rrScan(safeDefaultSpell)
         end
     end
 
-    -- Skip scan for alive Affinity if already targeting one
+    -- Scan for alive Affinity (SuperWoW FIRST, then vanilla fallback)
     if not engaging then
-        -- Scan for alive Affinity
         for _, affinity in ipairs(EleTargets) do
-            local ability = string.lower(pclasses[playerclass][affinity] or "")
+            local ability = strlower(pclasses[playerclass][affinity] or "")
             if ability ~= "cantattack" then
-                if targetAliveElementalByName(affinity) then
+                -- Try SuperWoW GUID targeting first
+                local targeted = false
+                if hasSuperWoW then
+                    targeted = targetAffinityByGUID(affinity)
+                end
+                
+                -- Fallback to vanilla method
+                if not targeted then
+                    targeted = targetAliveElementalByName(affinity)
+                end
+                
+                if targeted then
                     rrEngageElemental(affinity, false)
                     engaging = true
                     break
@@ -145,7 +418,7 @@ function rrScan(safeDefaultSpell)
         end
     end
 
-    -- No Affinity engaged — fallback spell and clear target only if needed
+    -- No Affinity engaged – fallback spell
     if not engaging then
         if safeDefaultSpell and safeDefaultSpell ~= "" then
             CastSpellByName(safeDefaultSpell)
@@ -160,7 +433,7 @@ function rrEngageElemental(elementalName, continuing)
 	if continuing then
 		rrCastTheThing(elementalName)
 	else
-		local ability = string.lower(pclasses[playerclass][elementalName] or "")
+		local ability = strlower(pclasses[playerclass][elementalName] or "")
 		if ability ~= "cantattack" then
 			PlaySound("GLUECREATECHARACTERBUTTON")
 			local customMsg = affinityMessages[elementalName]
@@ -190,7 +463,7 @@ end
 function isInMoonkinForm()
 	for i = 1, 40 do
 		local buff = UnitBuff("player", i)
-		if buff and string.find(buff, "Moonkin") then
+		if buff and strfind(buff, "Moonkin") then
 			return true
 		end
 	end
@@ -202,7 +475,7 @@ function cancelShapeshiftForm()
 		local icon = UnitBuff("player", i)
 		if icon then
 			local _, _, buffTexture = UnitBuff("player", i)
-			if buffTexture and string.find(buffTexture, "Ability_") then
+			if buffTexture and strfind(buffTexture, "Ability_") then
 				CancelPlayerBuff(i)
 				break
 			end
@@ -213,7 +486,7 @@ end
 function rrCastTheThing(elementalName)
 	local abilities = pclasses[playerclass]
 	if abilities and abilities[elementalName] then
-		local ability = string.lower(abilities[elementalName])
+		local ability = strlower(abilities[elementalName])
 
 		if playerclass == "druid" then
 			if elementalName == PhysicalElName then
@@ -244,26 +517,97 @@ function rrCastTheThing(elementalName)
 	end
 end
 
-function targetAliveElementalByName(name)
-	ClearTarget()
-	for i = 1, 10 do
-		TargetNearestEnemy()
-		if UnitExists("target") then
-			local unitName = string.lower(UnitName("target") or "")
-			local isDead = UnitIsDeadOrGhost("target") or UnitHealth("target") <= 0
-			local isFriend = UnitIsFriend("player", "target")
-
-			if not isDead and not isFriend and unitName == string.lower(name) then
-				return true -- ✅ found the live affinity — stop scanning
-			end
-		end
-	end
-	return false
-end
-
+-- ===== SLASH COMMANDS =====
 SLASH_RRSCAN1 = "/rrscan"
 SlashCmdList["RRSCAN"] = function(msg)
+	-- Check for status command
+	if msg == "status" then
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00========== rrScan Status ==========|r")
+		
+		if hasSuperWoW then
+			DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00SuperWoW:|r |cff00ff00ACTIVE|r")
+		else
+			DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00SuperWoW:|r |cffffcc00NOT AVAILABLE (Vanilla Mode)|r")
+		end
+		
+		local guidCount = 0
+		for _ in pairs(GUIDCache) do
+			guidCount = guidCount + 1
+		end
+		
+		local affinityCount = 0
+		for _ in pairs(AffinityGUIDs) do
+			affinityCount = affinityCount + 1
+		end
+		
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00Cached GUIDs:|r " .. guidCount)
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00Cached Affinities:|r " .. affinityCount)
+		
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00Statistics:|r")
+		DEFAULT_CHAT_FRAME:AddMessage("  GUIDs Collected: " .. Stats.guidsCollected)
+		DEFAULT_CHAT_FRAME:AddMessage("  Affinities Found: " .. Stats.affinitiesFound)
+		DEFAULT_CHAT_FRAME:AddMessage("  SuperWoW Targets: " .. Stats.superWowTargets)
+		DEFAULT_CHAT_FRAME:AddMessage("  Vanilla Targets: " .. Stats.vanillaTargets)
+		
+		if hasSuperWoW then
+			DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00Known Affinities:|r")
+			for name, guid in pairs(AffinityGUIDs) do
+				local exists = UnitExists(guid) and "|cff00ff00[OK]|r" or "|cffff0000[X]|r"
+				DEFAULT_CHAT_FRAME:AddMessage("  " .. exists .. " " .. name)
+			end
+		end
+		
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00======================================|r")
+		return
+	end
+	
+	-- Check for debug command
+	if msg == "debug" then
+		debugMode = not debugMode
+		if debugMode then
+			DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Debug mode |cff00ff00ENABLED|r")
+		else
+			DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Debug mode |cffff0000DISABLED|r")
+		end
+		return
+	end
+	
+	-- Check for clear command
+	if msg == "clear" then
+		GUIDCache = {}
+		NameToGUID = {}
+		AffinityGUIDs = {}
+		Stats.guidsCollected = 0
+		Stats.affinitiesFound = 0
+		Stats.superWowTargets = 0
+		Stats.vanillaTargets = 0
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r All cached data cleared!")
+		return
+	end
+	
+	-- Normal scan
 	local didSomething = rrScan(msg)
 	if not didSomething and (not msg or msg == "") then
+		-- Do nothing (original behavior)
 	end
 end
+
+-- ===== INITIALIZATION =====
+local function Initialize()
+	-- Check if SuperWoW is available
+	hasSuperWoW = (TargetUnit ~= nil and SpellInfo ~= nil)
+	
+	if hasSuperWoW then
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Loaded. SuperWoW GUID targeting: |cff00ff00ACTIVE|r")
+		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Commands: /rrscan status, /rrscan debug")
+		guidFrame:Show()
+		cleanupFrame:Show()
+	else
+		DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00[rrScan]|r Loaded. SuperWoW not detected - using vanilla targeting")
+		DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00[rrScan]|r Install SuperWoW for instant GUID-based targeting!")
+		guidFrame:Hide()
+		cleanupFrame:Hide()
+	end
+end
+
+Initialize()
