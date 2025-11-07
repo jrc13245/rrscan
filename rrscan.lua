@@ -30,7 +30,7 @@ local FrostElName      = "Blue Affinity"
 local ArcaneElName     = "Mana Affinity"
 local NatureElName     = "Green Affinity"
 local ShadowElName     = "Black Affinity"
-local PhysicalElName   = "Mangy Wolf"
+local PhysicalElName   = "Crystal Affinity"
 local playerclass        
 
 local affinityMessages = {
@@ -173,37 +173,44 @@ local function AddUnit(unit)
 	-- Check if this is an Affinity
 	for _, affinityName in ipairs(EleTargets) do
 		if name == affinityName then
-			-- ✅ CRITICAL: Only store ALIVE Affinities!
-			-- If an old dead Affinity exists, replace it with new alive one
 			local oldGUID = AffinityGUIDs[affinityName]
 			
 			if not isDead then
-				-- New alive Affinity found
-				if oldGUID and oldGUID ~= guid then
-					-- Different GUID = new spawn, old one is dead
-					if debugMode then
-						DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00[rrScan]|r " .. affinityName .. " respawned (old GUID replaced)")
+				-- ✅ ALIVE Affinity found
+				local isNewAffinity = (oldGUID == nil or oldGUID ~= guid)
+				
+				if isNewAffinity then
+					if oldGUID then
+						-- Different GUID = respawn
+						if debugMode then
+							DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00[rrScan]|r " .. affinityName .. " respawned (new GUID)")
+						end
+					else
+						-- First time seeing this Affinity
+						if debugMode then
+							DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Found NEW Affinity: " .. affinityName)
+						end
 					end
+					
+					Stats.affinitiesFound = Stats.affinitiesFound + 1
 				end
 				
+				-- Always update to current GUID (even if same)
 				AffinityGUIDs[affinityName] = guid
 				
 				if isNew then
 					Stats.guidsCollected = Stats.guidsCollected + 1
-					Stats.affinitiesFound = Stats.affinitiesFound + 1
-					if debugMode then
-						DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Found Affinity: " .. affinityName)
-					end
 				end
 			else
-				-- Dead Affinity found
-				-- Only remove from AffinityGUIDs if it's the same GUID (to allow new spawns)
+				-- ❌ DEAD Affinity found
 				if oldGUID == guid then
+					-- This is the cached Affinity and it's dead - remove it
 					AffinityGUIDs[affinityName] = nil
 					if debugMode then
 						DEFAULT_CHAT_FRAME:AddMessage("|cffff0000[rrScan]|r " .. affinityName .. " died (removed from cache)")
 					end
 				end
+				-- If oldGUID != guid, ignore this dead one (it's an old corpse)
 			end
 			break
 		end
@@ -212,7 +219,7 @@ end
 
 -- ===== GUID CLEANUP =====
 local cleanupTimer = 0
-local CLEANUP_INTERVAL = 30
+local CLEANUP_INTERVAL = 0.1
 
 local function CleanupOldGUIDs()
 	local removed = 0
@@ -226,7 +233,6 @@ local function CleanupOldGUIDs()
 	end
 	
 	-- ✅ CRITICAL: Cleanup DEAD Affinities from AffinityGUIDs cache
-	-- This ensures we don't target dead Affinities when new ones spawn
 	for name, guid in pairs(AffinityGUIDs) do
 		if not UnitExists(guid) then
 			-- GUID no longer exists - remove it
@@ -251,6 +257,32 @@ local function CleanupOldGUIDs()
 	end
 end
 
+-- ===== AKTIVES SCANNEN NACH AFFINITIES =====
+local function ScanAllGUIDsForAffinities()
+	if not hasSuperWoW then return end
+	
+	for guid, data in pairs(GUIDCache) do
+		-- Prüfe ob dies eine Affinity ist
+		for _, affinityName in ipairs(EleTargets) do
+			if data.name == affinityName then
+				-- Prüfe ob noch nicht in AffinityGUIDs
+				if not AffinityGUIDs[affinityName] then
+					-- Verifiziere dass GUID noch existiert und lebendig ist
+					if UnitExists(guid) then
+						local isDead = UnitIsDead(guid) or UnitIsDeadOrGhost(guid) or UnitHealth(guid) <= 0
+						if not isDead then
+							AffinityGUIDs[affinityName] = guid
+							if debugMode then
+								DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Found " .. affinityName .. " via full scan!")
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+end
+
 -- ===== GUID COLLECTION FRAME =====
 local guidFrame = CreateFrame("Frame")
 guidFrame:RegisterEvent("UPDATE_MOUSEOVER_UNIT")
@@ -258,6 +290,13 @@ guidFrame:RegisterEvent("PLAYER_TARGET_CHANGED")
 guidFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 guidFrame:RegisterEvent("UNIT_AURA")
 guidFrame:RegisterEvent("UNIT_HEALTH")
+-- ✅ NEUE EVENTS WIE SHAGUSCAN:
+guidFrame:RegisterEvent("UNIT_COMBAT")
+guidFrame:RegisterEvent("UNIT_HAPPINESS")
+guidFrame:RegisterEvent("UNIT_MODEL_CHANGED")
+guidFrame:RegisterEvent("UNIT_PORTRAIT_UPDATE")
+guidFrame:RegisterEvent("UNIT_FACTION")
+guidFrame:RegisterEvent("UNIT_FLAGS")
 
 guidFrame:SetScript("OnEvent", function()
 	if not hasSuperWoW then return end
@@ -270,7 +309,14 @@ guidFrame:SetScript("OnEvent", function()
 	elseif event == "PLAYER_ENTERING_WORLD" then
 		AddUnit("player")
 		AddUnit("target")
+	elseif event == "UNIT_HEALTH" then
+		-- Bei Health-Updates sofort prüfen ob Affinity gestorben ist
+		local unit = arg1
+		if unit then
+			AddUnit(unit)
+		end
 	else
+		-- ✅ Alle anderen Events nutzen arg1 als unit
 		local unit = arg1
 		if unit then
 			AddUnit(unit)
@@ -287,6 +333,8 @@ cleanupFrame:SetScript("OnUpdate", function()
 	if cleanupTimer >= CLEANUP_INTERVAL then
 		cleanupTimer = 0
 		CleanupOldGUIDs()
+		-- ✅ Nach Cleanup aktiv nach Affinities scannen
+		ScanAllGUIDsForAffinities()
 	end
 end)
 
@@ -297,6 +345,26 @@ local function targetAffinityByGUID(affinityName)
 	end
 	
 	local guid = AffinityGUIDs[affinityName]
+	
+	-- ✅ NEW: If no GUID cached, try to find one immediately
+	if not guid then
+		for cachedGuid, data in pairs(GUIDCache) do
+			if data.name == affinityName and not data.isDead then
+				if UnitExists(cachedGuid) then
+					local stillAlive = not (UnitIsDead(cachedGuid) or UnitIsDeadOrGhost(cachedGuid) or UnitHealth(cachedGuid) <= 0)
+					if stillAlive then
+						AffinityGUIDs[affinityName] = cachedGuid
+						guid = cachedGuid
+						if debugMode then
+							DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r Recovered " .. affinityName .. " from cache!")
+						end
+						break
+					end
+				end
+			end
+		end
+	end
+	
 	if not guid then
 		return false
 	end
