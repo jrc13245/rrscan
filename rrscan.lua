@@ -408,31 +408,6 @@ local function targetAffinityByGUID(affinityName)
 	return false
 end
 
--- ===== VANILLA: TARGET BY NAME (FALLBACK) =====
-function targetAliveElementalByName(name)
-	-- Erst prüfen ob die Affinity überhaupt existiert, BEVOR wir Target clearen
-	local found = false
-	
-	-- Scan ohne Target zu ändern
-	for i = 1, 10 do
-		TargetNearestEnemy()
-		if UnitExists("target") then
-			local unitName = strlower(UnitName("target") or "")
-			local isDead = UnitIsDeadOrGhost("target") or UnitHealth("target") <= 0
-			local isFriend = UnitIsFriend("player", "target")
-
-			if not isDead and not isFriend and unitName == strlower(name) then
-				found = true
-				Stats.vanillaTargets = Stats.vanillaTargets + 1
-				return true
-			end
-		end
-	end
-	
-	-- Nur wenn NICHT gefunden, Target NICHT ändern (altes Target behalten)
-	return false
-end
-
 -- ===== MAIN SCAN FUNCTION (SUPERWOW ONLY) =====
 function rrScan(safeDefaultSpell)
     if not hasSuperWoW then
@@ -551,6 +526,16 @@ function cancelShapeshiftForm()
 end
 
 function rrCastTheThing(elementalName)
+	-- Validate target is still alive before casting
+	if not UnitExists("target") then
+		return
+	end
+
+	local isDead = UnitIsDead("target") or UnitIsDeadOrGhost("target") or UnitHealth("target") <= 0
+	if isDead then
+		return
+	end
+
 	local abilities = pclasses[playerclass]
 	if abilities and abilities[elementalName] then
 		local ability = strlower(abilities[elementalName])
@@ -560,11 +545,14 @@ function rrCastTheThing(elementalName)
 				if not isInCatForm() then
 					cancelShapeshiftForm()
 					CastSpellByName("Cat Form")
+					return
 				else
 					CastSpellByName("Claw")
+					return
 				end
-				return
 			elseif elementalName == ArcaneElName or elementalName == NatureElName then
+				-- Just cancel form if in wrong form (e.g., Cat/Bear)
+				-- Don't cast Moonkin - too slow, just cast from caster form
 				if not isInMoonkinForm() then
 					cancelShapeshiftForm()
 				end
@@ -646,7 +634,6 @@ SlashCmdList["RRSCAN"] = function(msg)
 		Stats.guidsCollected = 0
 		Stats.affinitiesFound = 0
 		Stats.superWowTargets = 0
-		Stats.vanillaTargets = 0
 		DEFAULT_CHAT_FRAME:AddMessage("|cff00ff00[rrScan]|r All cached data cleared!")
 		return
 	end
